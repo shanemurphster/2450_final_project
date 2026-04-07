@@ -1,0 +1,6 @@
+pandas>=2.0
+python-dotenv>=1.0    # loads .env files into environment variables
+lxml>=4.9           # primary HTML parser for pandas.read_html
+html5lib>=1.1       # fallback HTML parser for pandas.read_html
+requests>=2.31      # used by the BeautifulSoup fallback path
+beautifulsoup4>=4.12  # fallback when read_html can't find the table
