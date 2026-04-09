@@ -1,0 +1,22 @@
+# Mac system files
+.DS_Store
+data/.DS_Store
+data/**/.DS_Store
+src/.DS_Store
+
+# Data files (regenerable from scripts)
+data/raw/*.csv
+data/processed/*.csv
+data/external/
+
+# Credentials
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
