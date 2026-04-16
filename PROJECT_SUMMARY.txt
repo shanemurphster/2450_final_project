@@ -1,0 +1,216 @@
+Billboard Boxing — Project Summary
+CIS 2450 Final Project | Shane Murphy & Matthieu Bouchard
+Last updated: April 2026
+================================================================================
+
+PROJECT GOAL
+------------
+Predict whether a song appeared on the Billboard Hot 100 using Spotify audio
+features (danceability, energy, valence, tempo, etc.). Framed as binary
+classification: Billboard hit (label=1) vs. non-hit (label=0).
+
+
+DATASET
+-------
+Final dataset: data/processed/billboard_expanded_dataset.csv
+  - 62,688 songs total
+  - 31,344 hits (label=1) / 31,344 non-hits (label=0) — perfect 50/50 split
+  - Year range: 1921–2024
+  - 100% audio feature coverage (73% real, 27% imputed by year-median)
+  - 12 audio features: danceability, energy, loudness, speechiness, acousticness,
+    instrumentalness, liveness, valence, tempo, key, mode, duration_ms
+  - Engineered features: decade, is_explicit
+
+Sources:
+  1. Billboard Hot 100 weekly charts (1958–2024)
+     - data/hot-100-current.csv — 343k rows, 31,344 unique songs after dedup
+     - Provides positives (hits) with peak_rank and wks_on_chart
+  2. Kaggle Spotify Dataset (yamaerenay, 170k tracks, 1921–2020)
+     - data/archive/data.csv
+     - Provides audio features for both hits and non-hits
+     - Non-hits sampled from this dataset (songs not in Billboard)
+
+
+DATA PIPELINE
+-------------
+All scripts live in src/cleaning/:
+
+1. wiki_scraper.py
+   - Scrapes Billboard Year-End Hot 100 from Wikipedia (2010–2025)
+   - Output: data/raw/ CSVs per year
+
+2. spotify_api.py + spotify_negative_sampler.py + spotify_second_pass.py
+   - Calls Spotify API to enrich Billboard songs with metadata
+   - Samples non-hit songs from Spotify by year
+   - Output: data/raw/spotify_billboard_matches.csv,
+             data/processed/spotify_negatives_by_year.csv
+
+3. clean_billboard_data.py
+   - Cleans and standardizes chart data (artist name normalization, dedup)
+
+4. merge_dataset.py
+   - Combines positives and negatives into billboard_modeling_dataset.csv
+   - Old small dataset (7,864 songs, 2010–2025)
+
+5. merge_audio_features.py
+   - Enriches billboard_modeling_dataset.csv with Kaggle audio features
+   - 3-pass matching: Spotify ID → exact title+artist → base title+artist
+     (strips remix/version keywords, brackets, dashes)
+   - Fill rate: 33.2% on old dataset (limited by 2021–2025 gap in Kaggle data)
+
+6. build_expanded_dataset.py  *** NEW ***
+   - Builds the full 62k expanded dataset from scratch
+   - Positives: all unique Billboard Hot 100 songs (1958–2024)
+   - Negatives: sampled from Kaggle 170k dataset (non-Billboard songs)
+   - Same 3-pass matching for audio features (46.2% match rate on hits)
+   - Imputes unmatched hits with year-median audio features
+   - Output: data/processed/billboard_expanded_dataset.csv
+
+
+MATCHING / RECORD LINKAGE
+--------------------------
+Song matching across sources is one of the core technical contributions.
+Three-pass strategy in both merge scripts:
+  Pass 1 — Exact Spotify ID match
+  Pass 2 — Normalized title + primary artist
+            (lowercase, strip featuring clauses, remove punctuation)
+  Pass 3 — Base title + primary artist
+            (additionally strip brackets, dash suffixes, and version/remix
+             keywords like "remix", "acoustic", "radio edit", "remaster", etc.)
+
+Artist handling: Kaggle stores artists as stringified Python lists
+(e.g. "['Artist A', 'Artist B']") — we extract the first artist for matching.
+Billboard stores combined artist strings — we use the pre-computed primary_artist
+column from the cleaning pipeline.
+
+
+EDA (notebooks/eda_baseline.ipynb)
+-----------------------------------
+Built on the full 62k expanded dataset. Covers:
+
+1. Dataset overview
+   - Shape, label balance, missing value audit
+   - Songs per decade by label (bar chart)
+
+2. Audio feature distributions
+   - Histograms and box plots for all 9 audio features, hits vs non-hits
+   - Key finding: hits have higher danceability, energy, loudness;
+     non-hits skew more acoustic and instrumental
+
+3. Hypothesis testing
+   - Two-sample Welch t-tests for each feature (hits vs non-hits)
+   - Most features show statistically significant differences (p < 0.05)
+   - Validates that audio features carry genuine predictive signal
+
+4. Temporal trends
+   - Mean feature values by decade for hits vs non-hits
+   - Acousticness has declined since 1950s; energy has risen
+   - Hits consistently sit at the "more commercial" end of each era
+
+5. Outlier detection
+   - IQR method (3×IQR threshold) applied to all audio features
+   - Decision: retain outliers — tree-based models are robust
+
+6. Correlation matrix
+   - No feature pair exceeds |r| = 0.7
+   - No features dropped; Logistic Regression stable without VIF correction
+
+7. Duration & explicit content
+   - Hits cluster around 3–4 minutes; slight explicit content skew in hits
+
+8. Peak rank distribution
+   - Validates feasibility of multi-class framing (Top 10 / 11–50 / 51–100)
+
+Figures saved to outputs/figures/.
+
+
+MODELING (notebooks/modeling.ipynb)
+-------------------------------------
+Proper sklearn Pipeline used throughout — imputer and scaler fitted only on
+training data, never on the full dataset before splitting.
+
+Train/test split: 80/20, stratified by label, random_state=42.
+
+Features used (12 total):
+  danceability, energy, loudness, speechiness, acousticness,
+  instrumentalness, liveness, valence, tempo, duration_ms,
+  is_explicit, decade
+  NOTE: Spotify popularity excluded — label leakage risk (TA feedback).
+
+Model 1 — Logistic Regression (baseline)
+  Pipeline: SimpleImputer(median) → StandardScaler → LogisticRegression
+  CV F1 (5-fold): reported in notebook
+  Test Accuracy: 0.691 | Test F1: 0.716 | ROC-AUC: 0.764
+
+Model 2 — Random Forest
+  Pipeline: SimpleImputer(median) → RandomForestClassifier(n_estimators=200)
+  Test Accuracy: 0.808 | Test F1: 0.801 | ROC-AUC: 0.911
+
+Model 3 — XGBoost (default)
+  Pipeline: SimpleImputer(median) → XGBClassifier(n_estimators=200, lr=0.1)
+  Test Accuracy: 0.812 | Test F1: 0.811 | ROC-AUC: 0.917
+
+XGBoost (tuned) — GridSearchCV over n_estimators, max_depth, learning_rate
+  Best params reported in notebook
+  Test Accuracy: 0.813 | Test F1: 0.813 | ROC-AUC: 0.916
+
+Difficulty concepts covered (3/3 for full rubric credit):
+  1. Ensemble models — Random Forest + XGBoost
+  2. Hyperparameter tuning — GridSearchCV (5-fold CV, train set only)
+  3. Feature importance — XGBoost importance scores + bar chart
+
+Metrics used: Accuracy, F1, ROC-AUC, confusion matrix, classification report.
+
+
+WHAT'S LEFT (as of April 2026)
+--------------------------------
+1. Dashboard — Plotly/Dash interactive app (20 pts)
+   - EDA section: feature distributions, temporal trends, correlation heatmap
+   - Modeling section: model comparison table, confusion matrices, ROC curves,
+     feature importance chart
+   - Polish: clear labels, color consistency, no bugs
+
+2. Presentation slides + recording (10 pts)
+   - 8–10 minutes, both members on camera
+   - Sections: objective, data, EDA findings (3–5 charts), model results,
+     implications, challenges/limitations/future work
+   - Submit as PDF slides + recorded video
+
+3. Course topics to add for full score (need 6+)
+   Currently covered: supervised learning, record linking
+   Easy to add: Polars, SQL, hypothesis testing (already in EDA notebook)
+   That brings total to 5 — need one more (e.g. unsupervised clustering)
+
+4. Final submission on Gradescope (April 30, 11:59 PM EST)
+   - One member submits, must add teammate
+   - Re-adding required on any re-submission
+
+
+FILE STRUCTURE
+--------------
+2450_final_project/
+├── data/
+│   ├── raw/                         # Wikipedia scrape outputs (gitignored)
+│   ├── processed/                   # Cleaned/merged datasets (gitignored)
+│   ├── archive/                     # Kaggle 170k audio features (gitignored)
+│   └── hot-100-current.csv          # Billboard weekly 1958–2024 (gitignored)
+├── notebooks/
+│   ├── eda_baseline.ipynb           # Full EDA on 62k dataset
+│   └── modeling.ipynb               # 3-model pipeline + tuning + feature importance
+├── outputs/
+│   └── figures/                     # 20 saved plots
+├── src/
+│   ├── scraping/
+│   │   ├── wiki_scraper.py
+│   │   ├── spotify_api.py
+│   │   ├── spotify_negative_sampler.py
+│   │   └── spotify_second_pass.py
+│   └── cleaning/
+│       ├── clean_billboard_data.py
+│       ├── merge_dataset.py
+│       ├── merge_audio_features.py   # Updated: 3-pass matching, local Kaggle
+│       └── build_expanded_dataset.py # NEW: builds full 62k dataset
+├── PROJECT_SUMMARY.txt               # This file
+├── requirements.txt
+└── README.md
+================================================================================

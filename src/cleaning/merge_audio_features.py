@@ -2,18 +2,17 @@
 merge_audio_features.py  —  Billboard Boxing
 =============================================
 Enriches the merged modeling dataset with audio features from the
-Maharshi Pandya Spotify Tracks Dataset (114k tracks, via Hugging Face).
+Yamaerenay Spotify Dataset (170k tracks, 1921-2020, local CSV).
 
 Match strategy (in order)
 --------------------------
-1. Exact spotify_id match  (track_id == spotify_id)
+1. Exact spotify_id match  (id == spotify_id)
 2. Fuzzy title + artist match (lowercased, stripped)
 
 Audio feature columns added
 ----------------------------
 danceability, energy, key, loudness, mode, speechiness,
-acousticness, instrumentalness, liveness, valence, tempo,
-time_signature, track_genre
+acousticness, instrumentalness, liveness, valence, tempo
 
 Any song that already has audio features filled in (audio_features_available
 == True) is skipped — its existing values are preserved.
@@ -29,10 +28,10 @@ Usage
 
 import os
 import re
+import ast
 import logging
 
 import pandas as pd
-from datasets import load_dataset
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -51,6 +50,7 @@ log = logging.getLogger(__name__)
 
 PROJECT_ROOT  = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 MODELING_CSV  = os.path.join(PROJECT_ROOT, "data", "processed", "billboard_modeling_dataset.csv")
+KAGGLE_CSV    = os.path.join(PROJECT_ROOT, "data", "archive", "data.csv")
 
 # ---------------------------------------------------------------------------
 # Audio feature columns to pull from the Kaggle dataset
@@ -59,15 +59,23 @@ MODELING_CSV  = os.path.join(PROJECT_ROOT, "data", "processed", "billboard_model
 FEATURE_COLS = [
     "danceability", "energy", "key", "loudness", "mode",
     "speechiness", "acousticness", "instrumentalness",
-    "liveness", "valence", "tempo", "time_signature",
+    "liveness", "valence", "tempo",
 ]
 
 # ---------------------------------------------------------------------------
-# Text normalisation for fuzzy matching
+# Text normalisation for matching
 # ---------------------------------------------------------------------------
 
-_FEAT_RE  = re.compile(r'\s*(?:featuring|feat\.?|ft\.?|with)\s+.*$', re.IGNORECASE)
-_CLEAN_RE = re.compile(r'[^a-z0-9\s]')
+_FEAT_RE    = re.compile(r'\s*(?:featuring|feat\.?|ft\.?|with)\s+.*$', re.IGNORECASE)
+_BRACKET_RE = re.compile(r'\s*[\(\[].*?[\)\]]')
+_DASH_RE    = re.compile(r'\s*[-–—]\s+.*$')
+_VERSION_RE = re.compile(
+    r'\s+(?:remix|mix|edit|version|instrumental|karaoke|live|reprise|'
+    r'remaster|acoustic|radio|extended|club|single|unplugged)\b.*$',
+    re.IGNORECASE,
+)
+_CLEAN_RE   = re.compile(r'[^a-z0-9\s]')
+
 
 def _normalise(text: str) -> str:
     """Lowercase, strip featuring clause, remove non-alphanumeric chars."""
@@ -76,23 +84,49 @@ def _normalise(text: str) -> str:
     t = _CLEAN_RE.sub('', t)
     return t.strip()
 
+
+def _normalise_title(text: str) -> str:
+    """Aggressive title normalisation: strip brackets, dashes, and version/remix keywords."""
+    t = str(text).lower().strip()
+    t = _FEAT_RE.sub('', t)
+    t = _BRACKET_RE.sub('', t)
+    t = _DASH_RE.sub('', t)
+    t = _VERSION_RE.sub('', t)
+    t = _CLEAN_RE.sub('', t)
+    return t.strip()
+
 # ---------------------------------------------------------------------------
-# Load Hugging Face dataset
+# Load local Kaggle dataset
 # ---------------------------------------------------------------------------
+
+def _parse_artists(raw: str) -> str:
+    """Extract the first artist from a stringified list like \"['Artist A', 'Artist B']\"."""
+    try:
+        parsed = ast.literal_eval(raw)
+        if isinstance(parsed, list) and parsed:
+            return str(parsed[0])
+    except (ValueError, SyntaxError):
+        pass
+    return str(raw)
+
 
 def load_kaggle_features() -> pd.DataFrame:
-    log.info("Loading Maharshi Pandya Spotify dataset from Hugging Face...")
-    ds = load_dataset("maharshipandya/spotify-tracks-dataset")
-    df = ds['train'].to_pandas()
+    log.info(f"Loading Kaggle Spotify dataset from {KAGGLE_CSV} ...")
+    df = pd.read_csv(KAGGLE_CSV)
     log.info(f"  Loaded {len(df)} rows.")
 
-    # Normalise for matching
-    df["match_title"]  = df["track_name"].apply(_normalise)
-    df["match_artist"] = df["artists"].apply(_normalise)
+    # Normalise column names to match what the rest of the script expects
+    df = df.rename(columns={"id": "track_id", "name": "track_name"})
 
-    # Build a lookup dict: (match_title, match_artist) -> feature row
-    # Keep the most popular entry per (title, artist) pair to avoid
-    # accidentally picking a low-quality version
+    # artists column is a stringified Python list — extract primary artist
+    df["primary_artist"] = df["artists"].apply(_parse_artists)
+
+    # Normalise for matching — both standard and aggressive (base title)
+    df["match_title"]      = df["track_name"].apply(_normalise)
+    df["match_title_base"] = df["track_name"].apply(_normalise_title)
+    df["match_artist"]     = df["primary_artist"].apply(_normalise)
+
+    # Keep the most popular entry per (title, artist) pair
     df = df.sort_values("popularity", ascending=False)
     df = df.drop_duplicates(subset=["match_title", "match_artist"], keep="first")
 
@@ -118,10 +152,19 @@ def _build_fuzzy_lookup(kaggle_df: pd.DataFrame) -> dict[tuple, dict]:
     }
 
 
+def _build_base_title_lookup(kaggle_df: pd.DataFrame) -> dict[tuple, dict]:
+    """(norm_title_base, norm_artist) -> feature dict — for matching stripped remix/version titles."""
+    lookup = {}
+    for _, row in kaggle_df.iterrows():
+        key = (row["match_title_base"], row["match_artist"])
+        if key not in lookup:  # already sorted by popularity desc, keep first
+            lookup[key] = row.to_dict()
+    return lookup
+
+
 def _extract_features(kaggle_row: dict) -> dict:
     """Pull just the audio feature columns from a kaggle row."""
     features = {col: kaggle_row.get(col) for col in FEATURE_COLS}
-    features["track_genre"] = kaggle_row.get("track_genre")
     features["audio_features_available"] = True
     return features
 
@@ -135,20 +178,18 @@ def main():
     df = pd.read_csv(MODELING_CSV)
     log.info(f"  {len(df)} rows loaded.")
 
-    # Add track_genre column if not present
-    if "track_genre" not in df.columns:
-        df["track_genre"] = None
-
     # --- Load Kaggle features ---
-    kaggle_df = load_kaggle_features()
-    id_lookup    = _build_id_lookup(kaggle_df)
-    fuzzy_lookup = _build_fuzzy_lookup(kaggle_df)
+    kaggle_df        = load_kaggle_features()
+    id_lookup        = _build_id_lookup(kaggle_df)
+    fuzzy_lookup     = _build_fuzzy_lookup(kaggle_df)
+    base_ttl_lookup  = _build_base_title_lookup(kaggle_df)
 
     # --- Match loop ---
-    matched_id    = 0
-    matched_fuzzy = 0
-    already_had   = 0
-    unmatched     = 0
+    matched_id        = 0
+    matched_fuzzy     = 0
+    matched_base_ttl  = 0
+    already_had       = 0
+    unmatched         = 0
 
     for idx, row in df.iterrows():
         # Skip rows that already have features
@@ -164,14 +205,23 @@ def main():
             features = _extract_features(id_lookup[sid])
             matched_id += 1
 
-        # Pass 2: fuzzy title + artist match
+        # Pass 2: normalised title + primary artist
         if features is None:
             norm_title  = _normalise(str(row.get("spotify_title") or row.get("title", "")))
-            norm_artist = _normalise(str(row.get("spotify_artist") or row.get("artist", "")))
+            norm_artist = _normalise(str(row.get("primary_artist") or row.get("artist", "")))
             key = (norm_title, norm_artist)
             if key in fuzzy_lookup:
                 features = _extract_features(fuzzy_lookup[key])
                 matched_fuzzy += 1
+
+        # Pass 3: base title (brackets/dashes/version keywords stripped) + primary artist
+        if features is None:
+            base_title  = _normalise_title(str(row.get("spotify_title") or row.get("title", "")))
+            norm_artist = _normalise(str(row.get("primary_artist") or row.get("artist", "")))
+            key = (base_title, norm_artist)
+            if key in base_ttl_lookup:
+                features = _extract_features(base_ttl_lookup[key])
+                matched_base_ttl += 1
 
         if features is None:
             unmatched += 1
@@ -194,7 +244,8 @@ def main():
     print(f"  Total rows                  : {len(df)}")
     print(f"  Already had features        : {already_had}")
     print(f"  Matched via spotify_id      : {matched_id}")
-    print(f"  Matched via fuzzy title     : {matched_fuzzy}")
+    print(f"  Matched via title+artist    : {matched_fuzzy}")
+    print(f"  Matched via base title      : {matched_base_ttl}")
     print(f"  Unmatched (no features)     : {unmatched}")
     print(f"  Total rows with features    : {total_with_features}")
     print(f"  Feature fill rate           : {total_with_features/len(df)*100:.1f}%")
