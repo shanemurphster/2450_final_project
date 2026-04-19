@@ -110,7 +110,7 @@ def build_blind_pool():
     n_extra = max(0, 900 - len(nonhits_in_ds))
     kag = pd.read_csv("data/archive/data.csv")
     kag = kag.rename(columns={"id": "spotify_id", "name": "title"})
-    kag["primary_artist"] = kag["artists"].apply(_parse_artist)
+    kag["artist"]      = kag["artists"].apply(_parse_artist)
     kag["year"]        = pd.to_numeric(kag["year"], errors="coerce")
     kag["decade"]      = (kag["year"] // 10) * 10
     kag["is_explicit"] = kag["explicit"].astype(float).fillna(0).astype(int)
