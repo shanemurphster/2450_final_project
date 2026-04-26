@@ -6,8 +6,12 @@ src/.DS_Store
 
 # Data files (regenerable from scripts)
 data/raw/*.csv
-data/processed/*.csv
 data/external/
+
+# Processed data (billboard_expanded_dataset.csv is tracked)
+data/processed/billboard_clean.csv
+data/processed/billboard_modeling_dataset.csv
+data/processed/spotify_negatives_by_year.csv
 
 # Credentials
 .env
