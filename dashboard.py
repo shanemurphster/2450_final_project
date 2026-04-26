@@ -432,7 +432,7 @@ modeling_tab = html.Div([
 # App layout
 # ═════════════════════════════════════════════════════════════════════════════
 
-app = dash.Dash(__name__, title="Billboard Boxing")
+app = dash.Dash(__name__, title="Billboard Boxing", suppress_callback_exceptions=True)
 app.layout = html.Div([
 
     # Header
